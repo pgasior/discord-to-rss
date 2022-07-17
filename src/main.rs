@@ -1,21 +1,24 @@
-use std::env;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use atom_syndication::{Feed, FeedBuilder};
+use atom_syndication::{Feed, FeedBuilder, EntryBuilder, ContentBuilder, PersonBuilder, FixedDateTime};
 use axum::http::header::{self, HeaderValue};
-use axum::{Router, Extension};
-use axum::response::{Html, IntoResponse, Response};
+use axum::{Router};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
 use log::{info, error, debug};
 use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
 use serenity::async_trait;
-use serenity::model::channel::Message;
+use serenity::client::Cache;
+use serenity::model::Timestamp;
+use serenity::model::channel::{Message};
 use serenity::model::gateway::Ready;
-use serenity::model::id::ChannelId;
+use serenity::model::id::{ChannelId};
 use serenity::prelude::*;
+use substring::Substring;
+use tokio::signal;
 
 struct MessageHolderKey;
 
@@ -26,15 +29,20 @@ impl TypeMapKey for MessageHolderKey {
 #[derive(Clone, Debug)]
 struct ReceivedMessage {
     content: String,
-    author: String
+    author: String,
+    channel_name: String,
+    id: String,
+    timestamp: Timestamp
 }
 
-impl From<&Message> for ReceivedMessage {
-    fn from(item: &Message) -> Self {
+impl ReceivedMessage {
+    async fn from_discord_message(item: &Message, cache: &Cache) -> Self {
         ReceivedMessage {
             content: item.content.clone(),
-            author: item.author.name.clone()
-
+            author: item.author.name.clone(),
+            channel_name: item.channel_id.name(cache).await.unwrap_or("Unknown Channel".to_owned()),
+            timestamp: item.timestamp,
+            id: item.id.as_u64().to_string()
         }
     }
 }
@@ -59,8 +67,9 @@ impl IntoResponse for AtomFeed {
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
-    #[clap(long, value_parser)]
+    #[clap(long, value_parser, env)]
     discord_token: String,
+    #[clap(long, value_parser, env)]
     channel_id: String
 }
 
@@ -73,8 +82,10 @@ async fn main() {
     let buffer = Arc::new(RwLock::new(AllocRingBuffer::<ReceivedMessage>::with_capacity(32)));
 
     let app = Router::new()
-        .route("/", get(httphandler))
-        .layer(Extension(buffer.clone()));
+        .route("/", get({
+            let buffer = buffer.clone();
+            move || httphandler(buffer.clone())
+        }));
 
     // run it
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -84,9 +95,10 @@ async fn main() {
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILDS;
 
-    let mut client = Client::builder(&cli.discord_token, intents).event_handler(Handler {channelID: cli.channel_id}).await.expect("Err creating client");
+    let mut client = Client::builder(&cli.discord_token, intents).event_handler(Handler {channel_id: ChannelId(cli.channel_id.parse::<u64>().expect("Wrong ChannelId"))}).await.expect("Err creating client");
     {
         let mut data = client.data.write().await;
         data.insert::<MessageHolderKey>(buffer.clone());
@@ -94,50 +106,73 @@ async fn main() {
 
     tokio::select! {
         axum_result = axum_server => {
-            error!("Axum stopped {:?}", axum_result)
+            error!("Axum stopped {:?}", axum_result);
         }
         serenity_result = client.start() => {
-            error!("Serenity stopped {:?}", serenity_result.err())
+            error!("Serenity stopped {:?}", serenity_result.err());
+        }
+        _ = signal::ctrl_c() => {
+            info!("Exiting on Ctrl-C");
+            client.shard_manager.lock().await.shutdown_all().await;
+            info!("Shard manager shut down");
         }
     };
 }
 
 
 // #[axum_macros::debug_handler]
-async fn httphandler(Extension(buffer_lock): Extension<Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>>) -> AtomFeed {
+async fn httphandler(buffer_lock: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>) -> AtomFeed {
     let items: Vec<ReceivedMessage> = {
         let buffer = buffer_lock.read().await;
         buffer.iter().map(|i| i.clone()).collect()
     };
 
-    let feed = FeedBuilder::default()
-        .title("Feed title").build();
-    AtomFeed(feed)
+    let mut feed_builder = FeedBuilder::default();
+    feed_builder.title("Discord messages");
+    
+    for item in items.iter().rev() {
+        feed_builder.entry(
+            EntryBuilder::default()
+                .title(format!("{} wrote on {}: {}", &item.author, &item.channel_name, item.content.to_string().substring(0,80)))
+                .content(
+                    Some(ContentBuilder::default()
+                        .value(Some(item.content.to_owned()))
+                        .build()))
+                .authors([PersonBuilder::default().name(item.author.clone()).build()])
+                .published(FixedDateTime::parse_from_rfc3339(&item.timestamp.to_rfc3339()).ok())
+                .updated(FixedDateTime::parse_from_rfc3339(&item.timestamp.to_rfc3339()).unwrap())
+                .id(item.id.clone())
+                .build()
+        );
+    }
+    AtomFeed(feed_builder.build())
 }
 
 struct Handler {
-    channelID: String
+    channel_id: ChannelId
 }
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        debug!("{:?}", msg);
-        let buffer_lock = {
-            let data_read = ctx.data.read().await;
-            data_read.get::<MessageHolderKey>().unwrap().clone()
-        };
+        if msg.channel_id == self.channel_id {    
+            debug!("{:?}", msg);
+            let buffer_lock = {
+                let data_read = ctx.data.read().await;
+                data_read.get::<MessageHolderKey>().unwrap().clone()
+            };
 
-        {
-            let mut buffer = buffer_lock.write().await;
-            buffer.push(ReceivedMessage::from(&msg));
+            {
+                let mut buffer = buffer_lock.write().await;
+                buffer.push(ReceivedMessage::from_discord_message(&msg, &ctx.cache).await);
+            }
         }
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
-        let channel_id = ChannelId(996857942315913318);
-        let messages_reversed = channel_id.messages(ctx.http, |retriever| {
+
+        let messages_reversed = self.channel_id.messages(ctx.http, |retriever| {
             retriever.limit(20)
         }).await.unwrap().into_iter().rev().map(|element| element).collect::<Vec<Message>>();
 
@@ -149,7 +184,7 @@ impl EventHandler for Handler {
         {
             let mut buffer = buffer_lock.write().await;
             for i in &messages_reversed {
-                buffer.push(i.into())
+                buffer.push(ReceivedMessage::from_discord_message(i, &ctx.cache).await)
             }
         }
 
