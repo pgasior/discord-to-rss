@@ -17,3 +17,4 @@ ringbuffer = "0.8.4"
 atom_syndication = "0.11.0"
 clap = { version = "3.2.12", features = ["env", "derive"] }
 substring = "1.4.5"
+linkify = "0.9.0"

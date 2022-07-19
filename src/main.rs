@@ -1,8 +1,10 @@
+mod text2html;
+
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use atom_syndication::{Feed, FeedBuilder, EntryBuilder, ContentBuilder, PersonBuilder, FixedDateTime};
+use atom_syndication::{Feed, FeedBuilder, EntryBuilder, ContentBuilder, PersonBuilder, FixedDateTime, LinkBuilder};
 use axum::http::header::{self, HeaderValue};
 use axum::{Router};
 use axum::response::{IntoResponse, Response};
@@ -18,6 +20,7 @@ use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId};
 use serenity::prelude::*;
 use substring::Substring;
+use text2html::text2html;
 use tokio::signal;
 
 struct MessageHolderKey;
@@ -32,17 +35,21 @@ struct ReceivedMessage {
     author: String,
     channel_name: String,
     id: String,
-    timestamp: Timestamp
+    created_timestamp: Timestamp,
+    edited_timestamp: Timestamp,
+    message_url: String
 }
 
 impl ReceivedMessage {
     async fn from_discord_message(item: &Message, cache: &Cache) -> Self {
         ReceivedMessage {
-            content: item.content.clone(),
+            content: text2html(&item.content),
             author: item.author.name.clone(),
             channel_name: item.channel_id.name(cache).await.unwrap_or("Unknown Channel".to_owned()),
-            timestamp: item.timestamp,
-            id: item.id.as_u64().to_string()
+            created_timestamp: item.timestamp,
+            edited_timestamp: item.edited_timestamp.unwrap_or(item.timestamp),
+            id: item.id.as_u64().to_string(),
+            message_url: item.link()
         }
     }
 }
@@ -139,8 +146,9 @@ async fn httphandler(buffer_lock: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>)
                         .value(Some(item.content.to_owned()))
                         .build()))
                 .authors([PersonBuilder::default().name(item.author.clone()).build()])
-                .published(FixedDateTime::parse_from_rfc3339(&item.timestamp.to_rfc3339()).ok())
-                .updated(FixedDateTime::parse_from_rfc3339(&item.timestamp.to_rfc3339()).unwrap())
+                .published(FixedDateTime::parse_from_rfc3339(&item.created_timestamp.to_rfc3339()).ok())
+                .updated(FixedDateTime::parse_from_rfc3339(&item.edited_timestamp.to_rfc3339()).unwrap())
+                .links([LinkBuilder::default().href(item.message_url.clone()).build()])
                 .id(item.id.clone())
                 .build()
         );

@@ -376,6 +376,7 @@ dependencies = [
  "axum-macros",
  "clap",
  "eyre",
+ "linkify",
  "log",
  "pretty_env_logger",
  "ringbuffer",
@@ -719,6 +720,15 @@ name = "libc"
 version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
+
+[[package]]
+name = "linkify"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96dd5884008358112bc66093362197c7248ece00d46624e2cf71e50029f8cff5"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "lock_api"
