@@ -45,7 +45,7 @@ impl ReceivedMessage {
         ReceivedMessage {
             content: text2html(&item.content),
             author: item.author.name.clone(),
-            channel_name: item.channel_id.name(cache).await.unwrap_or("Unknown Channel".to_owned()),
+            channel_name: item.channel_id.name(cache).await.unwrap_or_else(|| "Unknown Channel".into()),
             created_timestamp: item.timestamp,
             edited_timestamp: item.edited_timestamp.unwrap_or(item.timestamp),
             id: item.id.as_u64().to_string(),
@@ -67,7 +67,7 @@ impl Deref for AtomFeed {
 
 impl IntoResponse for AtomFeed {
     fn into_response(self) -> Response {
-        ([(header::CONTENT_TYPE, HeaderValue::from_static("application/atom+xml; charset=utf-8".as_ref()))], self.to_string()).into_response()
+        ([(header::CONTENT_TYPE, HeaderValue::from_static("application/atom+xml; charset=utf-8"))], self.to_string()).into_response()
     }
 }
 
@@ -77,7 +77,11 @@ struct Cli {
     #[clap(long, value_parser, env)]
     discord_token: String,
     #[clap(long, value_parser, env)]
-    channel_id: String
+    channel_id: String,
+    #[clap(long, value_parser, env, default_value = "127.0.0.1")]
+    bind_address: String,
+    #[clap(long, value_parser, env, default_value = "3000")]
+    bind_port: String
 }
 
 #[tokio::main]
@@ -95,7 +99,8 @@ async fn main() {
         }));
 
     // run it
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr_string = format!("{}:{}", &cli.bind_address, &cli.bind_port);
+    let addr = addr_string.parse::<SocketAddr>().unwrap_or_else(|_| panic!("Invalid  bind address {}", &addr_string));
     info!("listening on {}", addr);
     let axum_server = axum::Server::bind(&addr)
         .serve(app.into_make_service());
@@ -131,7 +136,7 @@ async fn main() {
 async fn httphandler(buffer_lock: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>) -> AtomFeed {
     let items: Vec<ReceivedMessage> = {
         let buffer = buffer_lock.read().await;
-        buffer.iter().map(|i| i.clone()).collect()
+        buffer.iter().cloned().collect()
     };
 
     let mut feed_builder = FeedBuilder::default();
@@ -182,7 +187,7 @@ impl EventHandler for Handler {
 
         let messages_reversed = self.channel_id.messages(ctx.http, |retriever| {
             retriever.limit(20)
-        }).await.unwrap().into_iter().rev().map(|element| element).collect::<Vec<Message>>();
+        }).await.unwrap().into_iter().rev().collect::<Vec<Message>>();
 
         let buffer_lock = {
             let data_read = ctx.data.read().await;
