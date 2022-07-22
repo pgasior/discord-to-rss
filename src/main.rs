@@ -42,7 +42,7 @@ struct ReceivedMessage {
 
 impl ReceivedMessage {
     async fn from_discord_message(item: &Message, cache: &Cache) -> Self {
-        ReceivedMessage {
+        Self {
             content: text2html(&item.content),
             author: item.author.name.clone(),
             channel_name: item.channel_id.name(cache).await.unwrap_or_else(|| "Unknown Channel".into()),
@@ -148,7 +148,7 @@ async fn httphandler(buffer_lock: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>)
                 .title(format!("{} wrote on {}: {}", &item.author, &item.channel_name, item.content.to_string().substring(0,80)))
                 .content(
                     Some(ContentBuilder::default()
-                        .value(Some(item.content.to_owned()))
+                        .value(Some(item.content.clone()))
                         .build()))
                 .authors([PersonBuilder::default().name(item.author.clone()).build()])
                 .published(FixedDateTime::parse_from_rfc3339(&item.created_timestamp.to_rfc3339()).ok())
@@ -197,10 +197,10 @@ impl EventHandler for Handler {
         {
             let mut buffer = buffer_lock.write().await;
             for i in &messages_reversed {
-                buffer.push(ReceivedMessage::from_discord_message(i, &ctx.cache).await)
+                buffer.push(ReceivedMessage::from_discord_message(i, &ctx.cache).await);
             }
         }
 
-        debug!("Messages: {:?}", messages_reversed)
+        debug!("Messages: {:?}", messages_reversed);
     }
 }
