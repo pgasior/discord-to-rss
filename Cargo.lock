@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "discord-to-rss"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "atom_syndication",
  "axum",

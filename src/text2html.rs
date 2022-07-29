@@ -2,7 +2,7 @@ use linkify::LinkFinder;
 
 pub fn text2html(text: &str) -> String {
     let finder = LinkFinder::new();
-    finder
+    let content = finder
         .spans(text)
         .map(|span| match span.kind() {
             Some(linkify::LinkKind::Url | linkify::LinkKind::Email) => {
@@ -10,7 +10,8 @@ pub fn text2html(text: &str) -> String {
             }
             Some(_) | None => span.as_str().to_string(),
         })
-        .collect::<String>()
+        .collect::<String>();
+    format!("<pre>{}</pre>", &content)
 }
 
 #[cfg(test)]
@@ -20,7 +21,7 @@ mod tests {
     #[test]
     fn text2html_() {
         assert_eq!(
-            "text <a href=\"https://google.com\">https://google.com</a> text",
+            "<pre>text <a href=\"https://google.com\">https://google.com</a> text</pre>",
             text2html("text https://google.com text")
         );
     }

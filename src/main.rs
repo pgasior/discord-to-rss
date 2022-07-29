@@ -167,9 +167,8 @@ async fn httphandler(buffer_lock: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>)
         feed_builder.entry(
             EntryBuilder::default()
                 .title(format!(
-                    "{} wrote on {}: {}",
+                    "{}: {}",
                     &item.author,
-                    &item.channel_name,
                     item.content.to_string().substring(0, 80)
                 ))
                 .content(Some(
