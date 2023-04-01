@@ -3,6 +3,7 @@ mod text2html;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use atom_syndication::{
     ContentBuilder, EntryBuilder, Feed, FeedBuilder, FixedDateTime, LinkBuilder, PersonBuilder,
@@ -23,7 +24,8 @@ use serenity::model::Timestamp;
 use serenity::prelude::*;
 use substring::Substring;
 use text2html::text2html;
-use tokio::signal;
+use tokio_graceful_shutdown::{Toplevel, SubsystemHandle, IntoSubsystem};
+use miette::{miette, Result};
 
 struct MessageHolderKey;
 
@@ -32,6 +34,7 @@ impl TypeMapKey for MessageHolderKey {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] 
 struct ReceivedMessage {
     content: String,
     author: String,
@@ -83,7 +86,7 @@ impl IntoResponse for AtomFeed {
     }
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
     #[clap(long, value_parser, env)]
@@ -96,8 +99,76 @@ struct Cli {
     bind_port: String,
 }
 
+struct AxumSubsystem {
+    buffer: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>,
+    cli: Cli
+}
+
+struct SerenitySubsystem {
+    buffer: Arc<RwLock<AllocRingBuffer<ReceivedMessage>>>,
+    cli: Cli
+}
+
+#[async_trait]
+impl IntoSubsystem<miette::Report> for AxumSubsystem {
+    async fn run(self, subsys: SubsystemHandle) -> Result<()> {
+        let app = Router::new().route(
+            "/",
+            get({
+                let buffer = self.buffer;
+                move || httphandler(buffer.clone())
+            }),
+        );
+    
+        // run it
+        let addr_string = format!("{}:{}", &self.cli.bind_address, &self.cli.bind_port);
+        let addr = addr_string
+            .parse::<SocketAddr>()
+            .unwrap_or_else(|_| panic!("Invalid  bind address {}", &addr_string));
+        info!("listening on {}", addr);
+
+        axum::Server::bind(&addr).serve(app.into_make_service()).with_graceful_shutdown(subsys.on_shutdown_requested())
+            .await
+            .map_err(|err| miette! {err})
+       
+    }
+}
+
+#[async_trait]
+impl IntoSubsystem<miette::Report> for SerenitySubsystem {
+    async fn run(self, subsys: SubsystemHandle) -> Result<()> {
+        let intents = GatewayIntents::GUILD_MESSAGES
+            | GatewayIntents::DIRECT_MESSAGES
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILDS;
+
+        let mut client = Client::builder(&self.cli.discord_token, intents)
+            .event_handler(Handler {
+                channel_id: ChannelId(self.cli.channel_id.parse::<u64>().expect("Wrong ChannelId")),
+            })
+            .await
+            .expect("Err creating client");
+        {
+            let mut data = client.data.write().await;
+            data.insert::<MessageHolderKey>(self.buffer);
+        }
+
+        tokio::select! {
+            _ = subsys.on_shutdown_requested() => {
+                info!("Serenity shutdown requested");
+                client.shard_manager.lock().await.shutdown_all().await;
+                info!("Shard manager shut down");
+            }
+            serenity_result = client.start() => {
+                error!("Serenity stopped {:?}", serenity_result.err());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     pretty_env_logger::init();
 
     let cli = Cli::parse();
@@ -106,51 +177,16 @@ async fn main() {
         AllocRingBuffer::<ReceivedMessage>::with_capacity(32),
     ));
 
-    let app = Router::new().route(
-        "/",
-        get({
-            let buffer = buffer.clone();
-            move || httphandler(buffer.clone())
-        }),
-    );
+    let axum_subsystem = AxumSubsystem {buffer: buffer.clone(), cli: cli.clone()};
+    let serenity_subsystem = SerenitySubsystem {buffer: buffer.clone(), cli: cli.clone()};
 
-    // run it
-    let addr_string = format!("{}:{}", &cli.bind_address, &cli.bind_port);
-    let addr = addr_string
-        .parse::<SocketAddr>()
-        .unwrap_or_else(|_| panic!("Invalid  bind address {}", &addr_string));
-    info!("listening on {}", addr);
-    let axum_server = axum::Server::bind(&addr).serve(app.into_make_service());
-
-    let intents = GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT
-        | GatewayIntents::GUILDS;
-
-    let mut client = Client::builder(&cli.discord_token, intents)
-        .event_handler(Handler {
-            channel_id: ChannelId(cli.channel_id.parse::<u64>().expect("Wrong ChannelId")),
-        })
+    Toplevel::new()
+        .start("Axum", axum_subsystem.into_subsystem())
+        .start("Serenity", serenity_subsystem.into_subsystem())
+        .catch_signals()
+        .handle_shutdown_requests(Duration::from_secs(10))
         .await
-        .expect("Err creating client");
-    {
-        let mut data = client.data.write().await;
-        data.insert::<MessageHolderKey>(buffer.clone());
-    }
-
-    tokio::select! {
-        axum_result = axum_server => {
-            error!("Axum stopped {:?}", axum_result);
-        }
-        serenity_result = client.start() => {
-            error!("Serenity stopped {:?}", serenity_result.err());
-        }
-        _ = signal::ctrl_c() => {
-            info!("Exiting on Ctrl-C");
-            client.shard_manager.lock().await.shutdown_all().await;
-            info!("Shard manager shut down");
-        }
-    };
+        .map_err(Into::into)
 }
 
 // #[axum_macros::debug_handler]
